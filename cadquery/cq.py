@@ -37,6 +37,7 @@ from typing import (
 from typing_extensions import Literal
 from inspect import Parameter, Signature
 
+
 from .occ_impl.geom import Vector, Plane, Location
 from .occ_impl.shapes import (
     Shape,
@@ -50,7 +51,7 @@ from .occ_impl.shapes import (
 
 from .occ_impl.exporters.svg import getSVG, exportSVG
 
-from .utils import deprecate
+from .utils import deprecate, deprecate_kwarg_name
 
 from .selectors import Selector, StringSyntaxSelector, DirectionMinMaxSelector
 
@@ -58,6 +59,8 @@ from .sketch import Sketch
 
 CQObject = Union[Vector, Location, Shape, Sketch]
 VectorLike = Union[Tuple[float, float], Tuple[float, float, float], Vector]
+CombineMode = Union[bool, Literal["cut", "a", "s"]]  # a : additive, s: subtractive
+TOL = 1e-6
 
 T = TypeVar("T", bound="Workplane")
 """A type variable used to make the return type of a method the same as the
@@ -446,7 +449,7 @@ class Workplane(object):
         then it is added.
 
         Used in rare cases when you need to combine the results of several CQ
-        results into a single Workplane object. Shelling is one common example.
+        results into a single Workplane object.
         """
         if isinstance(obj, list):
             self.objects.extend(obj)
@@ -540,14 +543,14 @@ class Workplane(object):
              face(s) or vertex (vertices). 'ProjectedOrigin' uses by default the current origin
              or the optional origin parameter (if specified) and projects it onto the plane
              defined by the selected face(s).
-           * The Z direction will be the normal of the face,computed
+           * The Z direction will be the normal of the face, computed
              at the center point.
            * The X direction will be parallel to the x-y plane. If the workplane is  parallel to
              the global x-y plane, the x direction of the workplane will co-incide with the
              global x direction.
 
         Most commonly, the selected face will be planar, and the workplane lies in the same plane
-        of the face ( IE, offset=0).  Occasionally, it is useful to define a face offset from
+        of the face ( IE, offset=0). Occasionally, it is useful to define a face offset from
         an existing surface, and even more rarely to define a workplane based on a face that is
         not planar.
         """
@@ -1106,7 +1109,7 @@ class Workplane(object):
             endPt = startPt + endVec
             return obj.rotate(startPt, endPt, angleDegrees)
 
-        return self.each(_rot, False)
+        return self.each(_rot, False, False)
 
     def rotate(
         self: T,
@@ -1215,9 +1218,9 @@ class Workplane(object):
 
         To shell, first create a solid, and *in the same chain* select the faces you wish to remove.
 
-        :param thickness: a positive float, representing the thickness of the desired shell.
+        :param thickness: thickness of the desired shell.
             Negative values shell inwards, positive values shell outwards.
-        :param kind: kind of joints, intersection or arc (default: arc).
+        :param kind: kind of join, arc or intersection (default: arc).
         :raises ValueError: if the current stack contains objects that are not faces of a solid
              further up in the chain.
         :returns: a CQ object with the resulting shelled solid selected.
@@ -1225,26 +1228,16 @@ class Workplane(object):
         This example will create a hollowed out unit cube, where the top most face is open,
         and all other walls are 0.2 units thick::
 
-            Workplane().box(1,1,1).faces("+Z").shell(0.2)
+            Workplane().box(1, 1, 1).faces("+Z").shell(0.2)
 
-        Shelling is one of the cases where you may need to use the add method to select several
-        faces. For example, this example creates a 3-walled corner, by removing three faces
-        of a cube::
+        You can also select multiple faces at once. Here is an example that creates a three-walled
+        corner, by removing three faces of a cube::
 
-            s = Workplane().box(1,1,1)
-            s1 = s.faces("+Z")
-            s1.add(s.faces("+Y")).add(s.faces("+X"))
-            self.saveModel(s1.shell(0.2))
-
-        This fairly yucky syntax for selecting multiple faces is planned for improvement
+            Workplane().box(10, 10, 10).faces(">Z or >X or <Y").shell(1)
 
         **Note**:  When sharp edges are shelled inwards, they remain sharp corners, but **outward**
-        shells are automatically filleted, because an outward offset from a corner generates
-        a radius.
-
-
-        Future Enhancements:
-            Better selectors to make it easier to select multiple faces
+        shells are automatically filleted (unless kind="intersection"), because an outward offset
+        from a corner generates a radius.
         """
         solidRef = self.findSolid()
 
@@ -1481,51 +1474,42 @@ class Workplane(object):
         rotate: bool = True,
     ) -> T:
         """
-        Creates an polar array of points and pushes them onto the stack.
-        The 0 degree reference angle is located along the local X-axis.
+        Creates a polar array of points and pushes them onto the stack.
+        The zero degree reference angle is located along the local X-axis.
 
         :param radius: Radius of the array.
-        :param startAngle: Starting angle (degrees) of array. 0 degrees is
-            situated along local X-axis.
+        :param startAngle: Starting angle (degrees) of array. Zero degrees is
+            situated along the local X-axis.
         :param angle: The angle (degrees) to fill with elements. A positive
             value will fill in the counter-clockwise direction. If fill is
-            false, angle is the angle between elements.
-        :param count: Number of elements in array. ( > 0 )
+            False, angle is the angle between elements.
+        :param count: Number of elements in array. (count >= 1)
         :param fill: Interpret the angle as total if True (default: True).
         :param rotate: Rotate every item (default: True).
         """
 
-        if count <= 0:
-            raise ValueError("No elements in array")
-
-        # First element at start angle, convert to cartesian coords
-        x = radius * math.sin(math.radians(startAngle))
-        y = radius * math.cos(math.radians(startAngle))
-
-        if rotate:
-            loc = Location(Vector(x, y), Vector(0, 0, 1), -startAngle)
-        else:
-            loc = Location(Vector(x, y))
-
-        locs = [loc]
+        if count < 1:
+            raise ValueError(f"At least 1 element required, requested {count}")
 
         # Calculate angle between elements
         if fill:
-            if angle % 360 == 0:
+            if abs(math.remainder(angle, 360)) < TOL:
                 angle = angle / count
-            elif count > 1:
+            else:
                 # Inclusive start and end
-                angle = angle / (count - 1)
+                angle = angle / (count - 1) if count > 1 else startAngle
 
-        # Add additional elements
-        for i in range(1, count):
+        locs = []
+
+        # Add elements
+        for i in range(0, count):
             phi_deg = startAngle + (angle * i)
             phi = math.radians(phi_deg)
-            x = radius * math.sin(phi)
-            y = radius * math.cos(phi)
+            x = radius * math.cos(phi)
+            y = radius * math.sin(phi)
 
             if rotate:
-                loc = Location(Vector(x, y), Vector(0, 0, 1), -phi_deg)
+                loc = Location(Vector(x, y), Vector(0, 0, 1), phi_deg)
             else:
                 loc = Location(Vector(x, y))
 
@@ -2397,6 +2381,8 @@ class Workplane(object):
         self: T,
         callback: Callable[[CQObject], Shape],
         useLocalCoordinates: bool = False,
+        combine: CombineMode = True,
+        clean: bool = True,
     ) -> T:
         """
         Runs the provided function on each value in the stack, and collects the return values into
@@ -2407,6 +2393,9 @@ class Workplane(object):
         :param callBackFunction: the function to call for each item on the current stack.
         :param useLocalCoordinates: should  values be converted from local coordinates first?
         :type useLocalCoordinates: boolean
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
+        :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
+
 
         The callback function must accept one argument, which is the item on the stack, and return
         one object, which is collected. If the function returns None, nothing is added to the stack.
@@ -2442,15 +2431,16 @@ class Workplane(object):
             if isinstance(r, Wire):
                 if not r.forConstruction:
                     self._addPendingWire(r)
-
             results.append(r)
 
-        return self.newObject(results)
+        return self._combineWithBase(results, combine, clean)
 
     def eachpoint(
         self: T,
         callback: Callable[[Location], Shape],
         useLocalCoordinates: bool = False,
+        combine: CombineMode = False,
+        clean: bool = True,
     ) -> T:
         """
         Same as each(), except each item on the stack is converted into a point before it
@@ -2460,6 +2450,9 @@ class Workplane(object):
 
         :param useLocalCoordinates: should points be in local or global coordinates
         :type useLocalCoordinates: boolean
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
+        :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
+
 
         The resulting object has a point on the stack for each object on the original stack.
         Vertices and points remain a point.  Faces, Wires, Solids, Edges, and Shells are converted
@@ -2495,7 +2488,7 @@ class Workplane(object):
             if isinstance(r, Wire) and not r.forConstruction:
                 self._addPendingWire(r)
 
-        return self.newObject(res)
+        return self._combineWithBase(res, combine, clean)
 
     def rect(
         self: T,
@@ -2803,6 +2796,7 @@ class Workplane(object):
 
         return self.newObject([s])
 
+    # TODO: almost all code duplicated!
     # but parameter list is different so a simple function pointer won't work
     def cboreHole(
         self: T,
@@ -2830,9 +2824,15 @@ class Workplane(object):
         One hole is created for each item on the stack.  A very common use case is to use a
         construction rectangle to define the centers of a set of holes, like so::
 
-                s = Workplane(Plane.XY()).box(2,4,0.5).faces(">Z").workplane()\
-                    .rect(1.5,3.5,forConstruction=True)\
-                    .vertices().cboreHole(0.125, 0.25,0.125,depth=None)
+            s = (
+                Workplane()
+                .box(2, 4, 0.5)
+                .faces(">Z")
+                .workplane()
+                .rect(1.5, 3.5, forConstruction=True)
+                .vertices()
+                .cboreHole(0.125, 0.25, 0.125, depth=None)
+            )
 
         This sample creates a plate with a set of holes at the corners.
 
@@ -2885,9 +2885,15 @@ class Workplane(object):
         One hole is created for each item on the stack.  A very common use case is to use a
         construction rectangle to define the centers of a set of holes, like so::
 
-                s = Workplane(Plane.XY()).box(2,4,0.5).faces(">Z").workplane()\
-                    .rect(1.5,3.5,forConstruction=True)\
-                    .vertices().cskHole(0.125, 0.25,82,depth=None)
+            s = (
+                Workplane()
+                .box(2, 4, 0.5)
+                .faces(">Z")
+                .workplane()
+                .rect(1.5, 3.5, forConstruction=True)
+                .vertices()
+                .cskHole(0.125, 0.25, 82, depth=None)
+            )
 
         This sample creates a plate with a set of holes at the corners.
 
@@ -2936,9 +2942,15 @@ class Workplane(object):
         One hole is created for each item on the stack.  A very common use case is to use a
         construction rectangle to define the centers of a set of holes, like so::
 
-                s = Workplane(Plane.XY()).box(2,4,0.5).faces(">Z").workplane()\
-                    .rect(1.5,3.5,forConstruction=True)\
-                    .vertices().hole(0.125, 0.25,82,depth=None)
+            s = (
+                Workplane()
+                .box(2, 4, 0.5)
+                .faces(">Z")
+                .workplane()
+                .rect(1.5, 3.5, forConstruction=True)
+                .vertices()
+                .hole(0.125, 0.25, 82, depth=None)
+            )
 
         This sample creates a plate with a set of holes at the corners.
 
@@ -2963,7 +2975,7 @@ class Workplane(object):
         self: T,
         distance: float,
         angleDegrees: float,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -2980,7 +2992,7 @@ class Workplane(object):
 
         :param distance: the distance to extrude normal to the workplane
         :param angle: angle (in degrees) to rotate through the extrusion
-        :param boolean combine: True to combine the resulting solid with parent solids if found.
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
         :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
         :return: a CQ object with the resulting solid selected.
         """
@@ -3005,18 +3017,12 @@ class Workplane(object):
 
         r = Compound.makeCompound(shapes).fuse()
 
-        if combine:
-            newS = self._combineWithBase(r)
-        else:
-            newS = self.newObject([r])
-        if clean:
-            newS = newS.clean()
-        return newS
+        return self._combineWithBase(r, combine, clean)
 
     def extrude(
         self: T,
         until: Union[float, Literal["next", "last"], Face],
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
         both: bool = False,
         taper: Optional[float] = None,
@@ -3024,19 +3030,16 @@ class Workplane(object):
         """
         Use all un-extruded wires in the parent chain to create a prismatic solid.
 
-        :param until: the distance to extrude, normal to the workplane plane
         :param until: The distance to extrude, normal to the workplane plane. When a float is
           passed, the extrusion extends this far and a negative value is in the opposite direction
           to the normal of the plane. The string "next" extrudes until the next face orthogonal to
           the wire normal. "last" extrudes to the last face. If a object of type Face is passed then
-          the extrusion will extend until this face.
-        :param boolean combine: True to combine the resulting solid with parent solids if found. (Cannot be set to False when `until` is not set as a float)
+          the extrusion will extend until this face. **Note that the Workplane must contain a Solid for extruding to a given face.**
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
         :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
         :param boolean both: extrude in both directions symmetrically
         :param float taper: angle for optional tapered extrusion
         :return: a CQ object with the resulting solid selected.
-
-        extrude always *adds* material to a part.
 
         The returned object is always a CQ object, and depends on whether combine is True, and
         whether a context solid is already defined:
@@ -3046,14 +3049,19 @@ class Workplane(object):
         *  if combine is true, the value is combined with the context solid if it exists,
            and the resulting solid becomes the new context solid.
         """
+
+        # If subtractive mode is requested, use cutBlind
+        if combine in ("cut", "s"):
+            return self.cutBlind(until, clean, taper)
+
         # Handle `until` multiple values
-        if isinstance(until, str) and until in ("next", "last") and combine:
+        elif until in ("next", "last") and combine in (True, "a"):
             if until == "next":
                 faceIndex = 0
             elif until == "last":
                 faceIndex = -1
 
-            r = self._extrude(distance=None, both=both, taper=taper, upToFace=faceIndex)
+            r = self._extrude(None, both=both, taper=taper, upToFace=faceIndex)
 
         elif isinstance(until, Face) and combine:
             r = self._extrude(None, both=both, taper=taper, upToFace=until)
@@ -3071,20 +3079,14 @@ class Workplane(object):
                 f"Do not know how to handle until argument of type {type(until)}"
             )
 
-        if combine:
-            newS = self._combineWithBase(r)
-        else:
-            newS = self.newObject([r])
-        if clean:
-            newS = newS.clean()
-        return newS
+        return self._combineWithBase(r, combine, clean)
 
     def revolve(
         self: T,
         angleDegrees: float = 360.0,
         axisStart: Optional[VectorLike] = None,
         axisEnd: Optional[VectorLike] = None,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -3096,8 +3098,7 @@ class Workplane(object):
         :type axisStart: tuple, a two tuple
         :param axisEnd: the end point of the axis of rotation
         :type axisEnd: tuple, a two tuple
-        :param combine: True to combine the resulting solid with parent solids if found.
-        :type combine: boolean, combine with parent solid
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
         :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
         :return: a CQ object with the resulting solid selected.
 
@@ -3141,13 +3142,8 @@ class Workplane(object):
 
         # returns a Solid (or a compound if there were multiple)
         r = self._revolve(angleDegrees, axisStart, axisEnd)
-        if combine:
-            newS = self._combineWithBase(r)
-        else:
-            newS = self.newObject([r])
-        if clean:
-            newS = newS.clean()
-        return newS
+
+        return self._combineWithBase(r, combine, clean)
 
     def sweep(
         self: T,
@@ -3156,7 +3152,7 @@ class Workplane(object):
         sweepAlongWires: Optional[bool] = None,
         makeSolid: bool = True,
         isFrenet: bool = False,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
         transition: Literal["right", "round", "transformed"] = "right",
         normal: Optional[VectorLike] = None,
@@ -3167,7 +3163,7 @@ class Workplane(object):
 
         :param path: A wire along which the pending wires will be swept
         :param boolean multiSection: False to create multiple swept from wires on the chain along path. True to create only one solid swept along path with shape following the list of wires on the chain
-        :param boolean combine: True to combine the resulting solid with parent solids if found.
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
         :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
         :param transition: handling of profile orientation at C1 path discontinuities. Possible values are {'transformed','round', 'right'} (default: 'right').
         :param normal: optional fixed normal for extrusion
@@ -3196,18 +3192,48 @@ class Workplane(object):
             auxSpine,
         )  # returns a Solid (or a compound if there were multiple)
 
-        newS: T
-        if combine:
-            newS = self._combineWithBase(r)
-        else:
-            newS = self.newObject([r])
-        if clean:
-            newS = newS.clean()
-        return newS
+        return self._combineWithBase(r, combine, clean)
 
-    def _combineWithBase(self: T, obj: Shape) -> T:
+    def _combineWithBase(
+        self: T,
+        obj: Union[Shape, Iterable[Shape]],
+        mode: CombineMode = True,
+        clean: bool = False,
+    ) -> T:
         """
         Combines the provided object with the base solid, if one can be found.
+        :param obj: The object to be combined with the context solid
+        :param mode: The mode to combine with the base solid (True, False, "cut", "a" or "s")
+        :return: a new object that represents the result of combining the base object with obj,
+           or obj if one could not be found
+        """
+
+        if mode:
+            # since we are going to do something convert the iterable if needed
+            if not isinstance(obj, Shape):
+                obj = Compound.makeCompound(obj)
+
+            # dispatch on the mode
+            if mode in ("cut", "s"):
+                newS = self._cutFromBase(obj)
+            elif mode in (True, "a"):
+                newS = self._fuseWithBase(obj)
+
+        else:
+            # do not combine branch
+            newS = self.newObject(obj if not isinstance(obj, Shape) else [obj])
+
+        if clean:
+            # NB: not calling self.clean() to not pollute the parents
+            newS.objects = [
+                obj.clean() if isinstance(obj, Shape) else obj for obj in newS.objects
+            ]
+
+        return newS
+
+    def _fuseWithBase(self: T, obj: Shape) -> T:
+        """
+        Fuse the provided object with the base solid, if one can be found.
         :param obj:
         :return: a new object that represents the result of combining the base object with obj,
            or obj if one could not be found
@@ -3220,7 +3246,6 @@ class Workplane(object):
             r = baseSolid.fuse(obj)
         elif isinstance(obj, Compound):
             r = obj.fuse()
-
         return self.newObject([r])
 
     def _cutFromBase(self: T, obj: Shape) -> T:
@@ -3230,9 +3255,8 @@ class Workplane(object):
         :return: a new object that represents the result of combining the base object with obj,
            or obj if one could not be found
         """
-        baseSolid = self._findType(
-            (Solid, Compound), searchStack=True, searchParents=True
-        )
+        baseSolid = self._findType((Solid, Compound), True, True)
+
         r = obj
         if baseSolid is not None:
             r = baseSolid.cut(obj)
@@ -3510,11 +3534,17 @@ class Workplane(object):
         return self.newObject([s])
 
     def loft(
-        self: T, filled: bool = True, ruled: bool = False, combine: bool = True
+        self: T, ruled: bool = False, combine: CombineMode = True, clean: bool = True
     ) -> T:
         """
         Make a lofted solid, through the set of wires.
-        :return: a CQ object containing the created loft
+
+        :param boolean ruled: When set to `True` connects each section linearly and without continuity
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
+        :param boolean clean: call :py:meth:`clean` afterwards to have a clean shape
+
+        :return: a Workplane object containing the created loft
+
         """
 
         if self.ctx.pendingWires:
@@ -3527,14 +3557,9 @@ class Workplane(object):
 
         r: Shape = Solid.makeLoft(wiresToLoft, ruled)
 
-        if combine:
-            parentSolid = self._findType(
-                (Solid, Compound), searchStack=False, searchParents=True
-            )
-            if parentSolid is not None:
-                r = parentSolid.fuse(r)
+        newS = self._combineWithBase(r, combine, clean)
 
-        return self.newObject([r])
+        return newS
 
     def _getFaces(self) -> List[Face]:
         """
@@ -3744,10 +3769,12 @@ class Workplane(object):
 
     def interpPlate(
         self: T,
-        surf_edges: Union[Sequence[VectorLike], Sequence[Edge]],
+        surf_edges: Union[
+            Sequence[VectorLike], Sequence[Union[Edge, Wire]], "Workplane"
+        ],
         surf_pts: Sequence[VectorLike] = [],
         thickness: float = 0,
-        combine: bool = False,
+        combine: CombineMode = False,
         clean: bool = True,
         degree: int = 3,
         nbPtsOnCur: int = 15,
@@ -3761,7 +3788,9 @@ class Workplane(object):
         maxSegments: int = 9,
     ) -> T:
         """
-        Returns a plate surface that is 'thickness' thick, enclosed by 'surf_edge_pts' points,  and going through 'surf_pts' points.  Using pushpoints directly with interpPlate and combine=True, can be very resources intensive depending on the complexity of the shape. In this case set combine=False.
+        Returns a plate surface that is 'thickness' thick, enclosed by 'surf_edge_pts' points,  and going
+        through 'surf_pts' points.  Using pushPoints directly with interpPlate and combine=True, can be
+        very resources intensive depending on the complexity of the shape. In this case set combine=False.
 
         :param surf_edges
         :type 1 surf_edges: list of [x,y,z] float ordered coordinates
@@ -3796,34 +3825,39 @@ class Workplane(object):
         :type MaxSegments: Integer >= 2 (?)
         """
 
-        # If thickness is 0, only a 2D surface will be returned.
-        if thickness == 0:
-            combine = False
+        # convert points to edges if needed
+        edges: List[Union[Edge, Wire]] = []
+        points = []
+
+        if isinstance(surf_edges, Workplane):
+            edges.extend(cast(Edge, el) for el in surf_edges.edges().objects)
+        else:
+            for el in surf_edges:
+                if isinstance(el, (Edge, Wire)):
+                    edges.append(el)
+                else:
+                    points.append(el)
 
         # Creates interpolated plate
-        p = Solid.interpPlate(
-            surf_edges,
+        f: Face = Face.makeNSidedSurface(
+            edges if not points else [Wire.makePolygon(points).close()],
             surf_pts,
-            thickness,
-            degree,
-            nbPtsOnCur,
-            nbIter,
-            anisotropy,
-            tol2d,
-            tol3d,
-            tolAng,
-            tolCurv,
-            maxDeg,
-            maxSegments,
+            degree=degree,
+            nbPtsOnCur=nbPtsOnCur,
+            nbIter=nbIter,
+            anisotropy=anisotropy,
+            tol2d=tol2d,
+            tol3d=tol3d,
+            tolAng=tolAng,
+            tolCurv=tolCurv,
+            maxDeg=maxDeg,
+            maxSegments=maxSegments,
         )
 
-        plates = self.eachpoint(lambda loc: p.moved(loc), True)
+        # thicken if needed
+        s = f.thicken(thickness) if thickness > 0 else f
 
-        # if combination is not desired, just return the created boxes
-        if not combine:
-            return plates
-        else:
-            return self.union(plates, clean=clean)
+        return self.eachpoint(lambda loc: s.moved(loc), True, combine, clean)
 
     def box(
         self: T,
@@ -3831,7 +3865,7 @@ class Workplane(object):
         width: float,
         height: float,
         centered: Union[bool, Tuple[bool, bool, bool]] = True,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -3893,14 +3927,7 @@ class Workplane(object):
 
         box = Solid.makeBox(length, width, height, offset)
 
-        boxes = self.eachpoint(lambda loc: box.moved(loc), True)
-
-        # if combination is not desired, just return the created boxes
-        if not combine:
-            return boxes
-        else:
-            # combine everything
-            return self.union(boxes, clean=clean)
+        return self.eachpoint(lambda loc: box.moved(loc), True, combine, clean)
 
     def sphere(
         self: T,
@@ -3910,7 +3937,7 @@ class Workplane(object):
         angle2: float = 90,
         angle3: float = 360,
         centered: Union[bool, Tuple[bool, bool, bool]] = True,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -3964,13 +3991,7 @@ class Workplane(object):
         s = Solid.makeSphere(radius, offset, direct, angle1, angle2, angle3)
 
         # We want a sphere for each point on the workplane
-        spheres = self.eachpoint(lambda loc: s.moved(loc), True)
-
-        # If we don't need to combine everything, just return the created spheres
-        if not combine:
-            return spheres
-        else:
-            return self.union(spheres, clean=clean)
+        return self.eachpoint(lambda loc: s.moved(loc), True, combine, clean)
 
     def cylinder(
         self: T,
@@ -3979,7 +4000,7 @@ class Workplane(object):
         direct: Vector = Vector(0, 0, 1),
         angle: float = 360,
         centered: Union[bool, Tuple[bool, bool, bool]] = True,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -4027,13 +4048,7 @@ class Workplane(object):
         s = Solid.makeCylinder(radius, height, offset, direct, angle)
 
         # We want a cylinder for each point on the workplane
-        cylinders = self.eachpoint(lambda loc: s.moved(loc), True)
-
-        # If we don't need to combine everything, just return the created cylinders
-        if not combine:
-            return cylinders
-        else:
-            return self.union(cylinders, clean=clean)
+        return self.eachpoint(lambda loc: s.moved(loc), True, combine, clean)
 
     def wedge(
         self: T,
@@ -4047,7 +4062,7 @@ class Workplane(object):
         pnt: VectorLike = Vector(0, 0, 0),
         dir: VectorLike = Vector(0, 0, 1),
         centered: Union[bool, Tuple[bool, bool, bool]] = True,
-        combine: bool = True,
+        combine: CombineMode = True,
         clean: bool = True,
     ) -> T:
         """
@@ -4103,13 +4118,7 @@ class Workplane(object):
         w = Solid.makeWedge(dx, dy, dz, xmin, zmin, xmax, zmax, offset, dir)
 
         # We want a wedge for each point on the workplane
-        wedges = self.eachpoint(lambda loc: w.moved(loc), True)
-
-        # If we don't need to combine everything, just return the created wedges
-        if not combine:
-            return wedges
-        else:
-            return self.union(wedges, clean=clean)
+        return self.eachpoint(lambda loc: w.moved(loc), True, combine, clean)
 
     def clean(self: T) -> T:
         """
@@ -4139,13 +4148,14 @@ class Workplane(object):
 
         return self.newObject(cleanObjects)
 
+    @deprecate_kwarg_name("cut", "combine='cut'")
     def text(
         self: T,
         txt: str,
         fontsize: float,
         distance: float,
         cut: bool = True,
-        combine: bool = False,
+        combine: CombineMode = False,
         clean: bool = True,
         font: str = "Arial",
         fontPath: Optional[str] = None,
@@ -4161,7 +4171,7 @@ class Workplane(object):
         :param distance: the distance to extrude or cut, normal to the workplane plane
         :type distance: float, negative means opposite the normal direction
         :param cut: True to cut the resulting solid from the parent solids if found
-        :param combine: True to combine the resulting solid with parent solids if found
+        :param combine: True or "a" to combine the resulting solid with parent solids if found, "cut" or "s" to remove the resulting solid from the parent solids if found. False to keep the resulting solid separated from the parent solids.
         :param clean: call :py:meth:`clean` afterwards to have a clean shape
         :param font: font name
         :param fontPath: path to font file
@@ -4207,14 +4217,9 @@ class Workplane(object):
         )
 
         if cut:
-            newS = self._cutFromBase(r)
-        elif combine:
-            newS = self._combineWithBase(r)
-        else:
-            newS = self.newObject([r])
-        if clean:
-            newS = newS.clean()
-        return newS
+            combine = "cut"
+
+        return self._combineWithBase(r, combine, clean)
 
     def textOnPath(
         self: T,

@@ -21,7 +21,11 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.TopoDS import TopoDS_Shape
 from OCP.TopLoc import TopLoc_Location
 
+from ..types import Real
+
 TOL = 1e-2
+
+VectorLike = Union["Vector", Tuple[Real, Real], Tuple[Real, Real, Real]]
 
 
 class Vector(object):
@@ -808,6 +812,9 @@ class BoundBox(object):
     zmax: float
     zlen: float
 
+    center: Vector
+    DiagonalLength: float
+
     def __init__(self, bb: Bnd_Box) -> None:
         self.wrapped = bb
         XMin, YMin, ZMin, XMax, YMax, ZMax = bb.Get()
@@ -943,7 +950,7 @@ class Location(object):
         ...
 
     @overload
-    def __init__(self, t: Vector) -> None:
+    def __init__(self, t: VectorLike) -> None:
         """Location with translation t with respect to the original location."""
         ...
 
@@ -953,7 +960,7 @@ class Location(object):
         ...
 
     @overload
-    def __init__(self, t: Plane, v: Vector) -> None:
+    def __init__(self, t: Plane, v: VectorLike) -> None:
         """Location corresponding to the angular location of the Plane t with translation v."""
         ...
 
@@ -968,7 +975,7 @@ class Location(object):
         ...
 
     @overload
-    def __init__(self, t: Vector, ax: Vector, angle: float) -> None:
+    def __init__(self, t: VectorLike, ax: VectorLike, angle: float) -> None:
         """Location with translation t and rotation around ax by angle
         with respect to the original location."""
         ...
@@ -982,8 +989,8 @@ class Location(object):
         elif len(args) == 1:
             t = args[0]
 
-            if isinstance(t, Vector):
-                T.SetTranslationPart(t.wrapped)
+            if isinstance(t, (Vector, tuple)):
+                T.SetTranslationPart(Vector(t).wrapped)
             elif isinstance(t, Plane):
                 cs = gp_Ax3(t.origin.toPnt(), t.zDir.toDir(), t.xDir.toDir())
                 T.SetTransformation(cs)
@@ -993,21 +1000,19 @@ class Location(object):
                 return
             elif isinstance(t, gp_Trsf):
                 T = t
-            elif isinstance(t, (tuple, list)):
-                raise TypeError(
-                    "A tuple or list is not a valid parameter, use a Vector instead."
-                )
             else:
                 raise TypeError("Unexpected parameters")
         elif len(args) == 2:
             t, v = args
-            cs = gp_Ax3(v.toPnt(), t.zDir.toDir(), t.xDir.toDir())
+            cs = gp_Ax3(Vector(v).toPnt(), t.zDir.toDir(), t.xDir.toDir())
             T.SetTransformation(cs)
             T.Invert()
         else:
             t, ax, angle = args
-            T.SetRotation(gp_Ax1(Vector().toPnt(), ax.toDir()), angle * math.pi / 180.0)
-            T.SetTranslationPart(t.wrapped)
+            T.SetRotation(
+                gp_Ax1(Vector().toPnt(), Vector(ax).toDir()), angle * math.pi / 180.0
+            )
+            T.SetTranslationPart(Vector(t).wrapped)
 
         self.wrapped = TopLoc_Location(T)
 
@@ -1019,6 +1024,10 @@ class Location(object):
     def __mul__(self, other: "Location") -> "Location":
 
         return Location(self.wrapped * other.wrapped)
+
+    def __pow__(self, exponent: int) -> "Location":
+
+        return Location(self.wrapped.Powered(exponent))
 
     def toTuple(self) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
         """Convert the location to a translation, rotation tuple."""
