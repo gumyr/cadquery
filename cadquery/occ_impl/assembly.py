@@ -1,4 +1,4 @@
-from typing import Iterable, Tuple, Dict, overload, Optional, Any, List
+from typing import Union, Iterable, Tuple, Dict, overload, Optional, Any, List
 from typing_extensions import Protocol
 from math import degrees
 
@@ -20,6 +20,10 @@ from vtkmodules.vtkRenderingCore import (
 from .geom import Location
 from .shapes import Shape, Compound
 from .exporters.vtk import toString
+from ..cq import Workplane
+
+# type definitions
+AssemblyObjects = Union[Shape, Workplane, None]
 
 
 class Color(object):
@@ -50,9 +54,18 @@ class Color(object):
         """
         ...
 
+    @overload
+    def __init__(self):
+        """
+        Construct a Color with default value.
+        """
+        ...
+
     def __init__(self, *args, **kwargs):
 
-        if len(args) == 1:
+        if len(args) == 0:
+            self.wrapped = Quantity_ColorRGBA()
+        elif len(args) == 1:
             self.wrapped = Quantity_ColorRGBA()
             exists = Quantity_ColorRGBA.ColorFromName_s(args[0], self.wrapped)
             if not exists:
@@ -81,6 +94,10 @@ class Color(object):
 class AssemblyProtocol(Protocol):
     @property
     def loc(self) -> Location:
+        ...
+
+    @loc.setter
+    def loc(self, value: Location) -> None:
         ...
 
     @property
@@ -118,7 +135,11 @@ def setColor(l: TDF_Label, color: Color, tool):
 
 
 def toCAF(
-    assy: AssemblyProtocol, coloredSTEP: bool = False
+    assy: AssemblyProtocol,
+    coloredSTEP: bool = False,
+    mesh: bool = False,
+    tolerance: float = 1e-3,
+    angularTolerance: float = 0.1,
 ) -> Tuple[TDF_Label, TDocStd_Document]:
 
     # prepare a doc
@@ -131,44 +152,66 @@ def toCAF(
     tool.SetAutoNaming_s(False)
     ctool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
-    # add root
-    top = tool.NewShape()
-    TDataStd_Name.Set_s(top, TCollection_ExtendedString("CQ assembly"))
+    # used to store labels with unique part-color combinations
+    unique_objs: Dict[Tuple[Color, AssemblyObjects], TDF_Label] = {}
+    # used to cache unique, possibly meshed, compounds; allows to avoid redundant meshing operations if same object is referenced multiple times in an assy
+    compounds: Dict[AssemblyObjects, Compound] = {}
 
-    # add leafs and subassemblies
-    subassys: Dict[str, Tuple[TDF_Label, Location]] = {}
-    for k, v in assy.traverse():
-        # leaf part
-        lab = tool.NewShape()
-        tool.SetShape(lab, Compound.makeCompound(v.shapes).wrapped)
-        setName(lab, f"{k}_part", tool)
+    def _toCAF(el, ancestor, color) -> TDF_Label:
 
-        # assy part
+        # create a subassy
         subassy = tool.NewShape()
-        tool.AddComponent(subassy, lab, TopLoc_Location())
-        setName(subassy, k, tool)
+        setName(subassy, el.name, tool)
 
-        # handle colors - this logic is needed for proper STEP export
-        color = v.color
-        tmp = v
-        if coloredSTEP:
-            while not color and tmp.parent:
-                tmp = tmp.parent
-                color = tmp.color
-            if color:
-                setColor(lab, color, ctool)
-        else:
-            if color:
-                setColor(subassy, color, ctool)
+        # define the current color
+        current_color = el.color if el.color else color
 
-        subassys[k] = (subassy, v.loc)
+        # add a leaf with the actual part if needed
+        if el.obj:
+            # get/register unique parts referenced in the assy
+            key0 = (current_color, el.obj)  # (color, shape)
+            key1 = el.obj  # shape
 
-        for ch in v.children:
-            tool.AddComponent(
-                subassy, subassys[ch.name][0], subassys[ch.name][1].wrapped
-            )
+            if key0 in unique_objs:
+                lab = unique_objs[key0]
+            else:
+                lab = tool.NewShape()
+                if key1 in compounds:
+                    compound = compounds[key1].copy(mesh)
+                else:
+                    compound = Compound.makeCompound(el.shapes)
+                    if mesh:
+                        compound.mesh(tolerance, angularTolerance)
 
-    tool.AddComponent(top, subassys[assy.name][0], assy.loc.wrapped)
+                    compounds[key1] = compound
+
+                tool.SetShape(lab, compound.wrapped)
+                setName(lab, f"{el.name}_part", tool)
+                unique_objs[key0] = lab
+
+                # handle colors when exporting to STEP
+                if coloredSTEP and current_color:
+                    setColor(lab, current_color, ctool)
+
+            tool.AddComponent(subassy, lab, TopLoc_Location())
+
+        # handle colors when *not* exporting to STEP
+        if not coloredSTEP and current_color:
+            setColor(subassy, current_color, ctool)
+
+        # add children recursively
+        for child in el.children:
+            _toCAF(child, subassy, current_color)
+
+        if ancestor:
+            # add the current subassy to the higher level assy
+            tool.AddComponent(ancestor, subassy, el.loc.wrapped)
+
+        return subassy
+
+    # process the whole assy recursively
+    top = _toCAF(assy, None, None)
+
     tool.UpdateAssemblies()
 
     return top, doc
@@ -218,6 +261,9 @@ def toJSON(
     color: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
     tolerance: float = 1e-3,
 ) -> List[Dict[str, Any]]:
+    """
+    Export an object to a structure suitable for converting to VTK.js JSON.
+    """
 
     loc = loc * assy.loc
     trans, rot = loc.toTuple()

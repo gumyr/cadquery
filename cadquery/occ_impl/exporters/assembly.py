@@ -24,6 +24,7 @@ from OCP.Message import Message_ProgressRange
 from OCP.Interface import Interface_Static
 
 from ..assembly import AssemblyProtocol, toCAF, toVTK
+from ..geom import Location
 
 
 def exportAssembly(assy: AssemblyProtocol, path: str, **kwargs) -> bool:
@@ -37,7 +38,7 @@ def exportAssembly(assy: AssemblyProtocol, path: str, **kwargs) -> bool:
     :param write_pcurves: Enable or disable writing parametric curves to the STEP file. Default True.
 
         If False, writes STEP file without pcurves. This decreases the size of the resulting STEP file.
-    :type write_pcurves: boolean
+    :type write_pcurves: bool
     :param precision_mode: Controls the uncertainty value for STEP entities. Specify -1, 0, or 1. Default 0.
         See OCCT documentation.
     :type precision_mode: int
@@ -154,21 +155,26 @@ def exportGLTF(
     assy: AssemblyProtocol,
     path: str,
     binary: bool = True,
-    tolerance: float = 0.1,
+    tolerance: float = 1e-3,
     angularTolerance: float = 0.1,
 ):
     """
     Export an assembly to a gltf file.
     """
 
-    # mesh all the shapes
-    for _, el in assy.traverse():
-        for s in el.shapes:
-            s.mesh(tolerance, angularTolerance)
+    # map from CadQuery's right-handed +Z up coordinate system to glTF's right-handed +Y up coordinate system
+    # https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#coordinate-system-and-units
+    orig_loc = assy.loc
+    assy.loc *= Location((0, 0, 0), (1, 0, 0), -90)
 
-    _, doc = toCAF(assy, True)
+    _, doc = toCAF(assy, True, True, tolerance, angularTolerance)
 
     writer = RWGltf_CafWriter(TCollection_AsciiString(path), binary)
-    return writer.Perform(
+    result = writer.Perform(
         doc, TColStd_IndexedDataMapOfStringString(), Message_ProgressRange()
     )
+
+    # restore coordinate system after exporting
+    assy.loc = orig_loc
+
+    return result

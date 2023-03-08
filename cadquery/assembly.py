@@ -27,7 +27,7 @@ from .selectors import _expression_grammar as _selector_grammar
 
 # type definitions
 AssemblyObjects = Union[Shape, Workplane, None]
-ExportLiterals = Literal["STEP", "XML", "GLTF", "VTKJS", "VRML"]
+ExportLiterals = Literal["STEP", "XML", "GLTF", "VTKJS", "VRML", "STL"]
 
 PATH_DELIM = "/"
 
@@ -346,7 +346,7 @@ class Assembly(object):
 
         return self
 
-    def solve(self) -> "Assembly":
+    def solve(self, verbosity: int = 0) -> "Assembly":
         """
         Solve the constraints.
         """
@@ -412,7 +412,7 @@ class Assembly(object):
         solver = ConstraintSolver(locs, constraints, locked=locked, scale=scale)
 
         # solve
-        locs_new, self._solve_result = solver.solve()
+        locs_new, self._solve_result = solver.solve(verbosity)
 
         # update positions
 
@@ -447,13 +447,13 @@ class Assembly(object):
         :param exportType: export format (default: None, results in format being inferred form the path)
         :param tolerance: the deflection tolerance, in model units. Only used for GLTF, VRML. Default 0.1.
         :param angularTolerance: the angular tolerance, in radians. Only used for GLTF, VRML. Default 0.1.
-        :param **kwargs: Additional keyword arguments.  Only used for STEP.
+        :param \**kwargs: Additional keyword arguments.  Only used for STEP.
             See :meth:`~cadquery.occ_impl.exporters.assembly.exportAssembly`.
         """
 
         if exportType is None:
             t = path.split(".")[-1].upper()
-            if t in ("STEP", "XML", "VRML", "VTKJS", "GLTF"):
+            if t in ("STEP", "XML", "VRML", "VTKJS", "GLTF", "STL"):
                 exportType = cast(ExportLiterals, t)
             else:
                 raise ValueError("Unknown extension, specify export type explicitly")
@@ -468,6 +468,8 @@ class Assembly(object):
             exportGLTF(self, path, True, tolerance, angularTolerance)
         elif exportType == "VTKJS":
             exportVTKJS(self, path)
+        elif exportType == "STL":
+            self.toCompound().exportStl(path, tolerance, angularTolerance)
         else:
             raise ValueError(f"Unknown format: {exportType}")
 

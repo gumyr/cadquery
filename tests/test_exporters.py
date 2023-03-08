@@ -8,10 +8,22 @@ from pathlib import Path
 import re
 import sys
 import pytest
+import ezdxf
+
+from pytest import approx
 
 # my modules
-from cadquery import *
-from cadquery import exporters, importers
+from cadquery import (
+    exporters,
+    importers,
+    Workplane,
+    Edge,
+    Vertex,
+    Assembly,
+    Plane,
+    Location,
+    Vector,
+)
 from tests import BaseTest
 from OCP.GeomConvert import GeomConvert
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
@@ -101,6 +113,7 @@ class TestExporters(BaseTest):
                 "strokeColor": (255, 0, 0),
                 "hiddenColor": (0, 0, 255),
                 "showHidden": True,
+                "focus": 4,
             },
         )
 
@@ -299,11 +312,11 @@ def test_stl_ascii(tmpdir, box123, id, opt, matchvals):
 @pytest.mark.parametrize(
     "id, opt, matchval",
     [
-        (0, None, b"STL Exported by OpenCASCADE"),
-        (1, {"ascii": False}, b"STL Exported by OpenCASCADE"),
-        (2, {"ASCII": False}, b"STL Exported by OpenCASCADE"),
-        (3, {"unknown_opt": 1}, b"STL Exported by OpenCASCADE"),
-        (4, {"unknown_opt": 1, "ascii": False}, b"STL Exported by OpenCASCADE"),
+        (0, None, b"STL Exported by Open CASCADE"),
+        (1, {"ascii": False}, b"STL Exported by Open CASCADE"),
+        (2, {"ASCII": False}, b"STL Exported by Open CASCADE"),
+        (3, {"unknown_opt": 1}, b"STL Exported by Open CASCADE"),
+        (4, {"unknown_opt": 1, "ascii": False}, b"STL Exported by Open CASCADE"),
     ],
 )
 def test_stl_binary(tmpdir, box123, id, opt, matchval):
@@ -357,3 +370,53 @@ def test_tessellate(box123):
     verts, triangles = box123.val().tessellate(1e-6)
     assert len(verts) == 24
     assert len(triangles) == 12
+
+
+def _dxf_spline_max_degree(fname):
+
+    dxf = ezdxf.readfile(fname)
+    msp = dxf.modelspace()
+
+    rv = 0
+
+    for el in msp:
+        if isinstance(el, ezdxf.entities.Spline):
+            rv = el.dxf.degree if el.dxf.degree > rv else rv
+
+    return rv
+
+
+def _check_dxf_no_spline(fname):
+
+    dxf = ezdxf.readfile(fname)
+    msp = dxf.modelspace()
+
+    for el in msp:
+        if isinstance(el, ezdxf.entities.Spline):
+            return False
+
+    return True
+
+
+def test_dxf_approx():
+
+    pts = [(0, 0), (0, 0.5), (1, 1)]
+    w1 = Workplane().spline(pts).close().extrude(1).edges("|Z").fillet(0.1).section()
+    exporters.exportDXF(w1, "orig.dxf")
+
+    assert _dxf_spline_max_degree("orig.dxf") == 6
+
+    exporters.exportDXF(w1, "limit1.dxf", approx="spline")
+    w1_i1 = importers.importDXF("limit1.dxf")
+
+    assert _dxf_spline_max_degree("limit1.dxf") == 3
+
+    assert w1.val().Area() == approx(w1_i1.val().Area(), 1e-3)
+    assert w1.edges().size() == w1_i1.edges().size()
+
+    exporters.exportDXF(w1, "limit2.dxf", approx="arc")
+    w1_i2 = importers.importDXF("limit2.dxf")
+
+    assert _check_dxf_no_spline("limit2.dxf")
+
+    assert w1.val().Area() == approx(w1_i2.val().Area(), 1e-3)

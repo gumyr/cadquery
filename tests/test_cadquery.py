@@ -3689,6 +3689,18 @@ class TestCadQuery(BaseTest):
         r = box.faces(">Z").workplane(invert=True).circle(0.5).extrude(4, combine="cut")
         self.assertGreater(box.val().Volume(), r.val().Volume())
 
+        # Test extrude with both=True and combine="cut"
+        wp_ref = Workplane("XY").rect(40, 40).extrude(20, both=True)
+
+        wp_ref_regular_cut = (
+            wp_ref.workplane(offset=-20).rect(20, 20).extrude(40, combine="s")
+        )
+
+        wp = wp_ref.workplane().rect(20, 20).extrude(20, both=True, combine="s")
+
+        assert wp.faces().size() == 6 + 4
+        self.assertAlmostEqual(wp_ref_regular_cut.val().Volume(), wp.val().Volume())
+
     def testTaperedExtrudeCutBlind(self):
 
         h = 1.0
@@ -3731,6 +3743,17 @@ class TestCadQuery(BaseTest):
         middle_face = s.faces(">Z[-2]")
 
         self.assertTrue(middle_face.val().Area() < 1)
+
+        with self.assertWarns(DeprecationWarning):
+            s = (
+                Workplane("XY")
+                .rect(2 * r, 2 * r)
+                .extrude(2 * h)
+                .faces(">Z")
+                .workplane()
+                .rect(r, r)
+                .cutBlind(-h, True, float(t))
+            )
 
     def testClose(self):
         # Close without endPoint and startPoint coincide.
@@ -5257,6 +5280,10 @@ class TestCadQuery(BaseTest):
         w2 = w1.close()
         self.assertTrue(w1 is w2)
 
+    def test_close_3D_points(self):
+        r = Workplane().polyline([(0, 0, 10), (5, 0, 12), (0, 5, 10),]).close()
+        assert r.wire().val().Closed()
+
     def testSplitShape(self):
         """
         Testing the Shape.split method.
@@ -5414,6 +5441,11 @@ class TestCadQuery(BaseTest):
 
         self.assertEqual(len(r4.solids().vals()), 1)
 
+        r5 = (
+            Workplane().sketch().polygon([(0, 0), (0, 1), (1, 0)]).finalize().extrude(1)
+        )
+        assert r5.val().Volume() == approx(0.5)
+
     def testCircumscribedPolygon(self):
         """
         Test that circumscribed polygons result in the correct shapes
@@ -5560,10 +5592,10 @@ class TestCadQuery(BaseTest):
         t = Compound.makeText("T", 5, 0).Faces()[0]
         f = Workplane("XZ", origin=(0, 0, -7)).sphere(6).faces("not %PLANE").val()
 
-        res = t.project(f, (0, 0, -1))
+        res = t.project(f, (0, 0, 1))
 
         assert res.isValid()
-        assert len(res.Edges()) == 8
+        assert len(res.Edges()) == len(t.Edges())
         assert t.distance(res) == approx(1)
 
         # extrude it
@@ -5575,12 +5607,12 @@ class TestCadQuery(BaseTest):
         # project a wire
         w = t.outerWire()
 
-        res_w = w.project(f, (0, 0, -1))
+        res_w = w.project(f, (0, 0, 1))
 
         assert len(res_w.Edges()) == 8
         assert res_w.isValid()
 
-        res_w1, res_w2 = w.project(f, (0, 0, -1), False)
+        res_w1, res_w2 = w.project(f, (0, 0, 1), False)
 
         assert len(res_w1.Edges()) == 8
         assert len(res_w2.Edges()) == 8
@@ -5589,7 +5621,7 @@ class TestCadQuery(BaseTest):
         o = Compound.makeText("O", 5, 0).Faces()[0]
         f = Workplane("XZ", origin=(0, 0, -7)).sphere(6).faces("not %PLANE").val()
 
-        res_o = o.project(f, (0, 0, -1))
+        res_o = o.project(f, (0, 0, 1))
 
         assert res_o.isValid()
 

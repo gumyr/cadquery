@@ -5,15 +5,15 @@ A special directive for including a cq object.
 
 import traceback
 
+from json import dumps
 from pathlib import Path
 from uuid import uuid1 as uuid
 from textwrap import indent
 
 from cadquery import exporters, Assembly, Compound, Color, Sketch
 from cadquery import cqgi
+from cadquery.occ_impl.assembly import toJSON
 from cadquery.occ_impl.jupyter_tools import (
-    toJSON,
-    dumps,
     TEMPLATE_RENDER,
     DEFAULT_COLOR,
 )
@@ -199,7 +199,7 @@ template_vtk = """
 .. raw:: html
 
     <div class="cq-vtk"
-     style="text-align:{txt_align}s;float:left;border: 1px solid #ddd; width:{width}; height:{height}"">
+     style="text-align:{txt_align};float:left;border: 1px solid #ddd; width:{width}; height:{height}">
        <script>
        var parent_element = {element};
        var data = {data};
